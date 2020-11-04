@@ -1,0 +1,65 @@
+node {
+
+  checkout scm
+  def project = env.JOB_NAME.split("/", 2)[0]
+  def gitCommit = sh(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
+
+  notifyStart()
+
+  stage ('Build image'){
+    try {
+      sh('docker rmi $(docker images --filter "dangling=true" -q --no-trunc) || true')
+      sh('docker rm $(docker ps -qa --no-trunc --filter "status=exited") || true')
+      sh("docker build -t ${project} .")
+    } catch (e) {
+      currentBuild.result = "FAILED"
+      notifyFailure()
+      throw e
+    }
+  }
+
+  stage ('Push image to registry'){
+    try {
+
+      withCredentials([usernamePassword(usernameVariable: 'ACCESS_KEY', passwordVariable: 'SECRET_KEY', credentialsId: 'b5ec3931-f30c-4e0f-af39-ad56457ebf1d')]) {
+        sh('export AWS_ACCESS_KEY_ID=$ACCESS_KEY')
+        sh('export AWS_SECRET_ACCESS_KEY=$SECRET_KEY')
+        sh('export AWS_DEFAULT_REGION=us-east-2')
+        sh('$(aws ecr get-login --no-include-email --region us-east-2) >/dev/null 2>&1')
+        sh("docker tag ${project}:latest 513387195489.dkr.ecr.us-east-2.amazonaws.com/${project}:${gitCommit}")
+        sh("docker push 513387195489.dkr.ecr.us-east-2.amazonaws.com/${project}:${gitCommit}")
+      }
+    } catch (e) {
+      currentBuild.result = "FAILED"
+      notifyFailure()
+      throw e
+    }
+  }
+
+  stage ('Deploy'){
+    try {
+      sh("FOREMAN_DEPLOY_IMAGE_TAG=${gitCommit} foreman")
+    } catch (e) {
+      currentBuild.result = "FAILED"
+      notifyFailure()
+      throw e
+    }
+  }
+
+  stage ("Slack Notification"){
+        notifyFinish(gitCommit)
+  }
+
+}
+
+def notifyStart() {
+  slackSend (color: '#D29D26', message: "STARTED: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]' (${env.BUILD_URL})")
+}
+
+def notifyFailure() {
+  slackSend (color: '#C10000', message: "FAILED: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]' (${env.BUILD_URL})")
+}
+
+def notifyFinish(gitCommit) {
+  slackSend (color: '#53A84C', message: "SUCCESSFUL: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]' (${env.BUILD_URL}) [${gitCommit}]")
+}
